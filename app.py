@@ -67,6 +67,6 @@ def summary():
     
     return jsonify({"last_active": last_active, "recent_apps": recent_apps})
 
+init_db()
 if __name__ == '__main__':
-    init_db()
     app.run(host='0.0.0.0', port=8080)
