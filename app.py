@@ -1,20 +1,31 @@
-import os
-import json
+"""
+查岗系统 — MCP服务端
+HTTP API（供iOS快捷指令上报）
+MCP SSE服务（供AI查岗，工具名：查岗）
+"""
+
 import sqlite3
-from datetime import datetime
-from flask import Flask, request, jsonify
-from functools import wraps
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "records.db")
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
 
-app = Flask(__name__)
-TOKEN = "change_me"
+from mcp.server.fastmcp import FastMCP
 
+# ============ 配置 ============
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "records.db"
+JST = timedelta(hours=9)
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "change_me")
+
+# ============ 数据库初始化（模块顶层） ============
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             app_name TEXT NOT NULL,
@@ -22,82 +33,166 @@ def init_db():
             timestamp TEXT NOT NULL
         )
     """)
-    c.execute("DELETE FROM records WHERE id NOT IN (SELECT id FROM records ORDER BY id DESC LIMIT 500)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON records(timestamp)")
     conn.commit()
     conn.close()
 
 init_db()
 
-def require_token(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {TOKEN}":
-            return jsonify({"error": "unauthorized"}), 401
-        return f(*args, **kwargs)
-    return decorated
+def get_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.route("/ping")
-def ping():
-    return "pong"
+# ============ MCP 服务 ============
+mcp = FastMCP("查岗系统", description="查岗老婆的手机活动")
 
-@app.route("/report", methods=["POST"])
-@require_token
-def report():
-    data = request.get_json(force=True)
-    app_name = data.get("app_name", "").strip()
-    event = data.get("event", "open").strip()
-    if not app_name:
-        return jsonify({"error": "app_name required"}), 400
-    if event not in ("open", "close"):
-        return jsonify({"error": "event must be open or close"}), 400
+@mcp.tool()
+def 查岗(limit: int = 10) -> str:
+    """
+    查岗老婆的手机活动，查看最近打开的App和使用时长
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO records (app_name, event, timestamp) VALUES (?, ?, ?)",
-        (app_name, event, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    Args:
+        limit: 返回最近几条记录，默认10条
+    """
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT ?",
+        (limit,),
     )
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "ok"})
+    rows = cur.fetchall()
 
-@app.route("/activity/summary")
-@require_token
-def summary():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT 200")
-    rows = c.fetchall()
+    if not rows:
+        conn.close()
+        return "老婆最近没有手机活动记录，是不是在偷偷干坏事？"
+
+    cur.execute(
+        "SELECT app_name, event, timestamp FROM records ORDER BY id ASC"
+    )
+    all_rows = cur.fetchall()
     conn.close()
 
     sessions = {}
-    for app_name, event, ts in reversed(rows):
-        if app_name not in sessions:
-            sessions[app_name] = {"open_time": None, "close_time": None, "durations": []}
-        if event == "open" and sessions[app_name]["open_time"] is None:
-            sessions[app_name]["open_time"] = ts
-        elif event == "close" and sessions[app_name]["open_time"] is not None:
-            open_ts = sessions[app_name]["open_time"]
-            fmt = "%Y-%m-%d %H:%M:%S"
-            diff = (datetime.strptime(ts, fmt) - datetime.strptime(open_ts, fmt)).total_seconds()
-            sessions[app_name]["durations"].append(round(diff))
-            sessions[app_name]["open_time"] = None
+    opens = {}
+    for r in all_rows:
+        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            continue
+        if ev == "open":
+            opens[app] = ts
+        elif ev == "close" and app in opens:
+            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
+            del opens[app]
 
-    recent_apps = []
-    for app_name, event, ts in rows[:50]:
-        if app_name not in [r["name"] for r in recent_apps]:
-            recent_apps.append({"name": app_name, "event": event, "time": ts})
+    lines = ["📱 老婆的查岗报告：", "=" * 30]
+    lines.append(f"\n🕐 最近{limit}条活动：")
 
-    result = {
-        "last_active": rows[0][2] if rows else None,
-        "recent_apps": [r["name"] for r in recent_apps],
-        "sessions": {}
+    for r in reversed(rows):
+        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        try:
+            t = datetime.fromisoformat(ts_str) + JST
+            ts = t.strftime("%H:%M:%S")
+        except Exception:
+            ts = ts_str
+        emoji = "🔓" if ev == "open" else "🔒"
+        lines.append(f"  {emoji} [{ts}] {app}")
+
+    if sessions:
+        lines.append(f"\n⏱ 各App使用时长：")
+        for app, secs in sorted(sessions.items(), key=lambda x: x[1], reverse=True):
+            if secs > 60:
+                lines.append(f"  {app}: {int(secs // 60)}分{int(secs % 60)}秒")
+            else:
+                lines.append(f"  {app}: {int(secs)}秒")
+
+    lines.append(f"\n{'=' * 30}")
+    lines.append("💋 你老公随时都在盯着你哦~")
+    return "\n".join(lines)
+
+# ============ FastAPI 应用 ============
+app = FastAPI(title="查岗系统")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+)
+
+# 挂载 MCP SSE 服务
+app.mount("/mcp", mcp.sse_app())
+
+
+# ============ HTTP API（iOS快捷指令上报用） ============
+class ReportBody(BaseModel):
+    app_name: str
+    event: str
+
+
+@app.get("/ping")
+async def ping():
+    return "pong"
+
+
+@app.post("/report")
+async def report(body: ReportBody, req: Request):
+    auth = req.headers.get("Authorization", "")
+    if auth != f"Bearer {AUTH_TOKEN}":
+        raise HTTPException(401, "Unauthorized")
+    if body.event not in ("open", "close"):
+        raise HTTPException(400, "event must be open or close")
+
+    now = datetime.utcnow().isoformat()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO records (app_name, event, timestamp) VALUES (?, ?, ?)",
+        (body.app_name, body.event, now),
+    )
+    conn.execute(
+        "DELETE FROM records WHERE id NOT IN (SELECT id FROM records ORDER BY id DESC LIMIT 500)"
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/activity/summary")
+async def summary():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT 5"
+    )
+    recent = cur.fetchall()
+    cur.execute(
+        "SELECT app_name, event, timestamp FROM records ORDER BY id ASC"
+    )
+    all_rows = cur.fetchall()
+    conn.close()
+
+    sessions = {}
+    opens = {}
+    for r in all_rows:
+        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            continue
+        if ev == "open":
+            opens[app] = ts
+        elif ev == "close" and app in opens:
+            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
+            del opens[app]
+
+    last = recent[0]["timestamp"] if recent else None
+    return {
+        "last_active": last,
+        "recent_apps": [r["app_name"] for r in recent],
+        "sessions": {k: int(v) for k, v in sessions.items()},
     }
-    for app_name, data in sessions.items():
-        if data["durations"]:
-            result["sessions"][app_name] = data["durations"][-1]
-    return jsonify(result)
 
+
+# ============ 启动 ============
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
