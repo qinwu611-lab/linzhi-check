@@ -1,5 +1,5 @@
 """
-查岗系统 — Streamable HTTP 版
+查岗系统 — Streamable HTTP 版（完整可用）
 """
 
 import sqlite3
@@ -42,7 +42,7 @@ def get_db():
     return conn
 
 
-mcp = FastMCP("查岗系统", json_response=True)
+mcp = FastMCP("查岗系统", transport="streamable-http")
 
 @mcp.tool()
 def 查岗(limit: int = 10) -> str:
@@ -99,7 +99,6 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 直接挂 mcp，原生支持 streamable-http
 app.mount("/mcp", mcp)
 
 
