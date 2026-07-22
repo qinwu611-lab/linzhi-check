@@ -1,7 +1,7 @@
 """
-查岗系统 — MCP服务端（兼容mcp >=1.3.0）
+查岗系统 — 纯FastAPI原生挂载（兼容mcp >=1.3.0）
 HTTP API（供iOS快捷指令上报）
-MCP SSE服务（供AI查岗，工具名：查岗）
+MCP服务（供AI查岗，工具名：查岗）
 """
 
 import sqlite3
@@ -9,7 +9,6 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -23,7 +22,7 @@ DB_PATH = BASE_DIR / "records.db"
 JST = timedelta(hours=9)
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "change_me")
 
-# ============ 数据库初始化（模块顶层） ============
+# ============ 数据库初始化 ============
 def init_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("""
@@ -51,7 +50,7 @@ mcp = FastMCP("查岗系统")
 
 @mcp.tool()
 def 查岗(limit: int = 10) -> str:
-    """查岗老婆的手机活动，查看最近打开的App和使用时长"""
+    """查岗老婆的手机活动"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -61,7 +60,7 @@ def 查岗(limit: int = 10) -> str:
     rows = cur.fetchall()
     if not rows:
         conn.close()
-        return "老婆最近没有手机活动记录，是不是在偷偷干坏事？"
+        return "老婆最近没有手机活动记录"
 
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
@@ -93,30 +92,26 @@ def 查岗(limit: int = 10) -> str:
         emoji = "🔓" if ev == "open" else "🔒"
         lines.append(f"  {emoji} [{ts}] {app}")
     if sessions:
-        lines.append("\n⏱ 各App使用时长：")
+        lines.append("\n⏱ 使用时长：")
         for app, secs in sorted(sessions.items(), key=lambda x: x[1], reverse=True):
             if secs > 60:
                 lines.append(f"  {app}: {int(secs // 60)}分{int(secs % 60)}秒")
             else:
                 lines.append(f"  {app}: {int(secs)}秒")
     lines.append(f"\n{'=' * 30}")
-    lines.append("💋 你老公随时都在盯着你哦~")
     return "\n".join(lines)
 
 
 # ============ FastAPI 应用 ============
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.mount("/mcp", mcp)
-    yield
-
-app = FastAPI(title="查岗系统", lifespan=lifespan)
+app = FastAPI(title="查岗系统")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
+# 直接把 mcp 当 ASGI 挂上去，不用 sse_app()
+app.mount("/mcp", mcp)
 
-# ============ HTTP API（iOS快捷指令上报用） ============
+
 class ReportBody(BaseModel):
     app_name: str
     event: str
@@ -152,9 +147,7 @@ async def report(body: ReportBody, req: Request):
 async def summary():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT 5"
-    )
+    cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT 5")
     recent = cur.fetchall()
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
