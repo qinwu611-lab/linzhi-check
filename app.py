@@ -1,5 +1,5 @@
 """
-查岗系统 — 最终完整版
+查岗系统 — 最终完整版（英文工具名）
 """
 
 import sqlite3
@@ -45,7 +45,8 @@ def get_db():
 mcp = FastMCP("查岗系统")
 
 @mcp.tool()
-def 查岗(limit: int = 10) -> str:
+def check_on_wife(limit: int = 10) -> str:
+    """查岗老婆的手机活动，查看最近打开的App和使用时长"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
