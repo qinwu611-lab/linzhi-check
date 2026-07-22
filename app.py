@@ -1,5 +1,5 @@
 """
-查岗系统 — 纯FastAPI + Starlette挂载（兼容mcp >=1.3.0）
+查岗系统 — Streamable HTTP 版
 """
 
 import sqlite3
@@ -10,8 +10,6 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from starlette.routing import Mount
-from starlette.applications import Starlette
 import uvicorn
 
 from mcp.server.fastmcp import FastMCP
@@ -44,7 +42,7 @@ def get_db():
     return conn
 
 
-mcp = FastMCP("查岗系统")
+mcp = FastMCP("查岗系统", json_response=True)
 
 @mcp.tool()
 def 查岗(limit: int = 10) -> str:
@@ -101,9 +99,8 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 关键：用 Starlette Mount 包一层再挂
-mcp_asgi = Starlette(routes=[Mount("/", app=mcp)])
-app.mount("/mcp", mcp_asgi)
+# 直接挂 mcp，原生支持 streamable-http
+app.mount("/mcp", mcp)
 
 
 class ReportBody(BaseModel):
