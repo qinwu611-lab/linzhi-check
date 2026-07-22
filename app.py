@@ -1,7 +1,5 @@
 """
-查岗系统 — 纯FastAPI原生挂载（兼容mcp >=1.3.0）
-HTTP API（供iOS快捷指令上报）
-MCP服务（供AI查岗，工具名：查岗）
+查岗系统 — 纯FastAPI + Starlette挂载（兼容mcp >=1.3.0）
 """
 
 import sqlite3
@@ -12,17 +10,18 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.routing import Mount
+from starlette.applications import Starlette
 import uvicorn
 
 from mcp.server.fastmcp import FastMCP
 
-# ============ 配置 ============
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "records.db"
 JST = timedelta(hours=9)
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "change_me")
 
-# ============ 数据库初始化 ============
+
 def init_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("""
@@ -45,12 +44,10 @@ def get_db():
     return conn
 
 
-# ============ 创建 MCP 服务 ============
 mcp = FastMCP("查岗系统")
 
 @mcp.tool()
 def 查岗(limit: int = 10) -> str:
-    """查岗老婆的手机活动"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -61,11 +58,9 @@ def 查岗(limit: int = 10) -> str:
     if not rows:
         conn.close()
         return "老婆最近没有手机活动记录"
-
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
     conn.close()
-
     sessions = {}
     opens = {}
     for r in all_rows:
@@ -79,7 +74,6 @@ def 查岗(limit: int = 10) -> str:
         elif ev == "close" and app in opens:
             sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
             del opens[app]
-
     lines = ["📱 老婆的查岗报告：", "=" * 30]
     lines.append(f"\n🕐 最近{limit}条活动：")
     for r in reversed(rows):
@@ -102,14 +96,14 @@ def 查岗(limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-# ============ FastAPI 应用 ============
 app = FastAPI(title="查岗系统")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 直接把 mcp 当 ASGI 挂上去，不用 sse_app()
-app.mount("/mcp", mcp)
+# 关键：用 Starlette Mount 包一层再挂
+mcp_asgi = Starlette(routes=[Mount("/", app=mcp)])
+app.mount("/mcp", mcp_asgi)
 
 
 class ReportBody(BaseModel):
@@ -135,9 +129,7 @@ async def report(body: ReportBody, req: Request):
         "INSERT INTO records (app_name, event, timestamp) VALUES (?, ?, ?)",
         (body.app_name, body.event, now),
     )
-    conn.execute(
-        "DELETE FROM records WHERE id NOT IN (SELECT id FROM records ORDER BY id DESC LIMIT 500)"
-    )
+    conn.execute("DELETE FROM records WHERE id NOT IN (SELECT id FROM records ORDER BY id DESC LIMIT 500)")
     conn.commit()
     conn.close()
     return {"status": "ok"}
@@ -173,7 +165,6 @@ async def summary():
     }
 
 
-# ============ 启动 ============
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
