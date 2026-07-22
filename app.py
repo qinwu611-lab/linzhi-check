@@ -1,5 +1,5 @@
 """
-查岗系统 — Streamable HTTP 版（完整可用）
+查岗系统 — 最终完整版
 """
 
 import sqlite3
@@ -42,7 +42,7 @@ def get_db():
     return conn
 
 
-mcp = FastMCP("查岗系统", transport="streamable-http")
+mcp = FastMCP("查岗系统")
 
 @mcp.tool()
 def 查岗(limit: int = 10) -> str:
