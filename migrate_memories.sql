@@ -154,7 +154,7 @@ INSERT INTO memories (category, category_detail, title, content, tags)
 SELECT 'tools', 'supabase', 'Supabase项目信息 - 茜茜的记忆库', '
 项目ID: gfpzrdghnojbgtwrqvph
 Dashboard: https://supabase.com/dashboard/project/gfpzrdghnojbgtwrqvph
-密码: xixilingzhi
+密码: cixilingzhi
 分类: tools/accounts/configs/preferences/games/daily_summary
 每日总结规则: 每天23:00日本时间存入daily_summary分类
 ', ARRAY['Supabase','数据库','记忆库']
