@@ -1,5 +1,5 @@
 """
-查岗系统 — 最终完整版（英文工具名）
+查岗系统 — HTTP纯接口版（去掉 mcp 依赖，解决 mcp.server.fastmcp 导入失败崩溃）
 按日本时间每日刷新：当天使用时长统计，每天零点自动清零
 """
 
@@ -12,8 +12,6 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
-
-from mcp.server.fastmcp import FastMCP
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "records.db"
@@ -50,32 +48,15 @@ def today_start_utc() -> str:
     return (today_jst_midnight - JST).isoformat()
 
 
-mcp = FastMCP("查岗系统")
-
-@mcp.tool()
-def check_on_wife(limit: int = 10) -> str:
-    """查岗老婆的手机活动，查看最近打开的App和当天使用时长"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT ?",
-        (limit,),
-    )
-    rows = cur.fetchall()
-    if not rows:
-        conn.close()
-        return "老婆最近没有手机活动记录"
+def build_sessions(rows):
+    """只统计日本时间今天内的使用时长（每日刷新）"""
     start = today_start_utc()
-    cur.execute(
-        "SELECT app_name, event, timestamp FROM records WHERE timestamp >= ? ORDER BY id ASC",
-        (start,),
-    )
-    all_rows = cur.fetchall()
-    conn.close()
     sessions = {}
     opens = {}
-    for r in all_rows:
+    for r in rows:
         app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        if ts_str < start:
+            continue
         try:
             ts = datetime.fromisoformat(ts_str)
         except Exception:
@@ -85,34 +66,13 @@ def check_on_wife(limit: int = 10) -> str:
         elif ev == "close" and app in opens:
             sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
             del opens[app]
-    lines = ["📱 老婆的查岗报告：", "=" * 30]
-    lines.append(f"\n🕐 最近{limit}条活动：")
-    for r in reversed(rows):
-        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
-        try:
-            t = datetime.fromisoformat(ts_str) + JST
-            ts = t.strftime("%H:%M:%S")
-        except Exception:
-            ts = ts_str
-        emoji = "🔓" if ev == "open" else "🔒"
-        lines.append(f"  {emoji} [{ts}] {app}")
-    if sessions:
-        lines.append("\n⏱ 今日使用时长：")
-        for app, secs in sorted(sessions.items(), key=lambda x: x[1], reverse=True):
-            if secs > 60:
-                lines.append(f"  {app}: {int(secs // 60)}分{int(secs % 60)}秒")
-            else:
-                lines.append(f"  {app}: {int(secs)}秒")
-    lines.append(f"\n{'=' * 30}")
-    return "\n".join(lines)
+    return sessions
 
 
 app = FastAPI(title="查岗系统")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
-
-app.mount("/mcp", mcp)
 
 
 class ReportBody(BaseModel):
@@ -150,31 +110,15 @@ async def summary():
     cur = conn.cursor()
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT 5")
     recent = cur.fetchall()
-    start = today_start_utc()
-    cur.execute(
-        "SELECT app_name, event, timestamp FROM records WHERE timestamp >= ? ORDER BY id ASC",
-        (start,),
-    )
+    cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
     conn.close()
-    sessions = {}
-    opens = {}
-    for r in all_rows:
-        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
-        try:
-            ts = datetime.fromisoformat(ts_str)
-        except Exception:
-            continue
-        if ev == "open":
-            opens[app] = ts
-        elif ev == "close" and app in opens:
-            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
-            del opens[app]
+    sessions = build_sessions(all_rows)
     last = recent[0]["timestamp"] if recent else None
     return {
         "last_active": last,
         "recent_apps": [r["app_name"] for r in recent],
-        "today_start": start,
+        "today_start": today_start_utc(),
         "sessions": {k: int(v) for k, v in sessions.items()},
     }
 
