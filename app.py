@@ -1,6 +1,6 @@
 """
 查岗系统 — 最终完整版（英文工具名）
-每日刷新：按日本时间统计当天使用时长，每天零点自动清零
+按日本时间每日刷新：当天使用时长统计，每天零点自动清零
 """
 
 import sqlite3
@@ -50,27 +50,6 @@ def today_start_utc() -> str:
     return (today_jst_midnight - JST).isoformat()
 
 
-def build_sessions(rows):
-    """只统计日本时间今天内的使用时长（每日刷新）"""
-    start = today_start_utc()
-    sessions = {}
-    opens = {}
-    for r in rows:
-        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
-        try:
-            ts = datetime.fromisoformat(ts_str)
-        except Exception:
-            continue
-        if ts_str < start:
-            continue
-        if ev == "open":
-            opens[app] = ts
-        elif ev == "close" and app in opens:
-            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
-            del opens[app]
-    return sessions
-
-
 mcp = FastMCP("查岗系统")
 
 @mcp.tool()
@@ -86,10 +65,26 @@ def check_on_wife(limit: int = 10) -> str:
     if not rows:
         conn.close()
         return "老婆最近没有手机活动记录"
-    cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
+    start = today_start_utc()
+    cur.execute(
+        "SELECT app_name, event, timestamp FROM records WHERE timestamp >= ? ORDER BY id ASC",
+        (start,),
+    )
     all_rows = cur.fetchall()
     conn.close()
-    sessions = build_sessions(all_rows)
+    sessions = {}
+    opens = {}
+    for r in all_rows:
+        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            continue
+        if ev == "open":
+            opens[app] = ts
+        elif ev == "close" and app in opens:
+            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
+            del opens[app]
     lines = ["📱 老婆的查岗报告：", "=" * 30]
     lines.append(f"\n🕐 最近{limit}条活动：")
     for r in reversed(rows):
@@ -162,13 +157,25 @@ async def summary():
     )
     all_rows = cur.fetchall()
     conn.close()
-    sessions = build_sessions(all_rows)
+    sessions = {}
+    opens = {}
+    for r in all_rows:
+        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            continue
+        if ev == "open":
+            opens[app] = ts
+        elif ev == "close" and app in opens:
+            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
+            del opens[app]
     last = recent[0]["timestamp"] if recent else None
     return {
         "last_active": last,
         "recent_apps": [r["app_name"] for r in recent],
         "today_start": start,
-        "today_sessions": {k: int(v) for k, v in sessions.items()},
+        "sessions": {k: int(v) for k, v in sessions.items()},
     }
 
 
