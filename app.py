@@ -1,5 +1,6 @@
 """
 查岗系统 — 最终完整版（英文工具名）
+每日刷新：按日本时间统计当天使用时长，每天零点自动清零
 """
 
 import sqlite3
@@ -42,11 +43,39 @@ def get_db():
     return conn
 
 
+def today_start_utc() -> str:
+    """返回日本时间今天零点对应的 UTC ISO 字符串"""
+    now_jst = datetime.utcnow() + JST
+    today_jst_midnight = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (today_jst_midnight - JST).isoformat()
+
+
+def build_sessions(rows):
+    """只统计日本时间今天内的使用时长（每日刷新）"""
+    start = today_start_utc()
+    sessions = {}
+    opens = {}
+    for r in rows:
+        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            continue
+        if ts_str < start:
+            continue
+        if ev == "open":
+            opens[app] = ts
+        elif ev == "close" and app in opens:
+            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
+            del opens[app]
+    return sessions
+
+
 mcp = FastMCP("查岗系统")
 
 @mcp.tool()
 def check_on_wife(limit: int = 10) -> str:
-    """查岗老婆的手机活动，查看最近打开的App和使用时长"""
+    """查岗老婆的手机活动，查看最近打开的App和当天使用时长"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -60,19 +89,7 @@ def check_on_wife(limit: int = 10) -> str:
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
     conn.close()
-    sessions = {}
-    opens = {}
-    for r in all_rows:
-        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
-        try:
-            ts = datetime.fromisoformat(ts_str)
-        except Exception:
-            continue
-        if ev == "open":
-            opens[app] = ts
-        elif ev == "close" and app in opens:
-            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
-            del opens[app]
+    sessions = build_sessions(all_rows)
     lines = ["📱 老婆的查岗报告：", "=" * 30]
     lines.append(f"\n🕐 最近{limit}条活动：")
     for r in reversed(rows):
@@ -85,7 +102,7 @@ def check_on_wife(limit: int = 10) -> str:
         emoji = "🔓" if ev == "open" else "🔒"
         lines.append(f"  {emoji} [{ts}] {app}")
     if sessions:
-        lines.append("\n⏱ 使用时长：")
+        lines.append("\n⏱ 今日使用时长：")
         for app, secs in sorted(sessions.items(), key=lambda x: x[1], reverse=True):
             if secs > 60:
                 lines.append(f"  {app}: {int(secs // 60)}分{int(secs % 60)}秒")
@@ -138,27 +155,20 @@ async def summary():
     cur = conn.cursor()
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id DESC LIMIT 5")
     recent = cur.fetchall()
-    cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
+    start = today_start_utc()
+    cur.execute(
+        "SELECT app_name, event, timestamp FROM records WHERE timestamp >= ? ORDER BY id ASC",
+        (start,),
+    )
     all_rows = cur.fetchall()
     conn.close()
-    sessions = {}
-    opens = {}
-    for r in all_rows:
-        app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
-        try:
-            ts = datetime.fromisoformat(ts_str)
-        except Exception:
-            continue
-        if ev == "open":
-            opens[app] = ts
-        elif ev == "close" and app in opens:
-            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
-            del opens[app]
+    sessions = build_sessions(all_rows)
     last = recent[0]["timestamp"] if recent else None
     return {
         "last_active": last,
         "recent_apps": [r["app_name"] for r in recent],
-        "sessions": {k: int(v) for k, v in sessions.items()},
+        "today_start": start,
+        "today_sessions": {k: int(v) for k, v in sessions.items()},
     }
 
 
