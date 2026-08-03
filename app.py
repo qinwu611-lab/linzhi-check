@@ -1,6 +1,7 @@
 """
 查岗系统 — HTTP纯接口版（去掉 mcp 依赖，解决 mcp.server.fastmcp 导入失败崩溃）
 按日本时间每日刷新：当天使用时长统计，每天零点自动清零
+加：iPhone 快捷指令上报电量/位置/自定义消息，存 life_states，查岗汇总时一并返回
 """
 
 import sqlite3
@@ -26,6 +27,16 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             app_name TEXT NOT NULL,
             event TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS life_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            battery INTEGER,
+            location TEXT,
+            note TEXT,
+            device TEXT DEFAULT 'iphone',
             timestamp TEXT NOT NULL
         )
     """)
@@ -80,6 +91,13 @@ class ReportBody(BaseModel):
     event: str
 
 
+class LifeBody(BaseModel):
+    battery: int | None = None
+    location: str | None = None
+    note: str | None = None
+    device: str = "iphone"
+
+
 @app.get("/ping")
 async def ping():
     return "pong"
@@ -104,6 +122,23 @@ async def report(body: ReportBody, req: Request):
     return {"status": "ok"}
 
 
+@app.post("/life")
+async def report_life(body: LifeBody, req: Request):
+    auth = req.headers.get("Authorization", "")
+    if auth != f"Bearer {AUTH_TOKEN}":
+        raise HTTPException(401, "Unauthorized")
+    now = datetime.utcnow().isoformat()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO life_states (battery, location, note, device, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (body.battery, body.location, body.note, body.device, now),
+    )
+    conn.execute("DELETE FROM life_states WHERE id NOT IN (SELECT id FROM life_states ORDER BY id DESC LIMIT 200)")
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "received": now}
+
+
 @app.get("/activity/summary")
 async def summary():
     conn = get_db()
@@ -112,6 +147,9 @@ async def summary():
     recent = cur.fetchall()
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
+    life = conn.execute(
+        "SELECT battery, location, note, device, timestamp FROM life_states ORDER BY id DESC LIMIT 1"
+    ).fetchone()
     conn.close()
     sessions = build_sessions(all_rows)
     last = recent[0]["timestamp"] if recent else None
@@ -120,6 +158,13 @@ async def summary():
         "recent_apps": [r["app_name"] for r in recent],
         "today_start": today_start_utc(),
         "sessions": {k: int(v) for k, v in sessions.items()},
+        "life": {
+            "battery": life["battery"] if life else None,
+            "location": life["location"] if life else None,
+            "note": life["note"] if life else None,
+            "device": life["device"] if life else None,
+            "timestamp": life["timestamp"] if life else None,
+        } if life else None,
     }
 
 
