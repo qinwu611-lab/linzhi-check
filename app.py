@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import uvicorn
 
 BASE_DIR = Path(__file__).parent
@@ -36,8 +36,8 @@ def init_db():
             battery INTEGER,
             location TEXT,
             weather TEXT,
-            brightness INTEGER,
-            volume INTEGER,
+            brightness REAL,
+            volume REAL,
             note TEXT,
             device TEXT DEFAULT 'iphone',
             timestamp TEXT NOT NULL
@@ -83,6 +83,16 @@ def build_sessions(rows):
     return sessions
 
 
+def coerce_num(v):
+    """把 int/float/字符串 统一转成 float；转不了就返回 None"""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 app = FastAPI(title="查岗系统")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -95,13 +105,18 @@ class ReportBody(BaseModel):
 
 
 class LifeBody(BaseModel):
-    battery: int | None = None
+    battery: int | str | None = None
     location: str | None = None
     weather: str | None = None
-    brightness: int | None = None
-    volume: int | None = None
+    brightness: int | float | str | None = None
+    volume: int | float | str | None = None
     note: str | None = None
     device: str = "iphone"
+
+    @field_validator("brightness", "volume")
+    @classmethod
+    def ensure_float(cls, v):
+        return coerce_num(v)
 
 
 @app.get("/ping")
