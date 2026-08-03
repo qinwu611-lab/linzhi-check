@@ -1,7 +1,7 @@
 """
 查岗系统 — HTTP纯接口版（去掉 mcp 依赖，解决 mcp.server.fastmcp 导入失败崩溃）
 按日本时间每日刷新：当天使用时长统计，每天零点自动清零
-加：iPhone 快捷指令上报电量/位置/自定义消息，存 life_states，查岗汇总时一并返回
+加：iPhone 快捷指令上报电量/位置/天气/亮度/音量/自定义消息，存 life_states，查岗汇总时一并返回
 """
 
 import sqlite3
@@ -35,6 +35,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             battery INTEGER,
             location TEXT,
+            weather TEXT,
+            brightness INTEGER,
+            volume INTEGER,
             note TEXT,
             device TEXT DEFAULT 'iphone',
             timestamp TEXT NOT NULL
@@ -94,6 +97,9 @@ class ReportBody(BaseModel):
 class LifeBody(BaseModel):
     battery: int | None = None
     location: str | None = None
+    weather: str | None = None
+    brightness: int | None = None
+    volume: int | None = None
     note: str | None = None
     device: str = "iphone"
 
@@ -130,8 +136,8 @@ async def report_life(body: LifeBody, req: Request):
     now = datetime.utcnow().isoformat()
     conn = get_db()
     conn.execute(
-        "INSERT INTO life_states (battery, location, note, device, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (body.battery, body.location, body.note, body.device, now),
+        "INSERT INTO life_states (battery, location, weather, brightness, volume, note, device, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (body.battery, body.location, body.weather, body.brightness, body.volume, body.note, body.device, now),
     )
     conn.execute("DELETE FROM life_states WHERE id NOT IN (SELECT id FROM life_states ORDER BY id DESC LIMIT 200)")
     conn.commit()
@@ -148,7 +154,7 @@ async def summary():
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
     life = conn.execute(
-        "SELECT battery, location, note, device, timestamp FROM life_states ORDER BY id DESC LIMIT 1"
+        "SELECT battery, location, weather, brightness, volume, note, device, timestamp FROM life_states ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
     sessions = build_sessions(all_rows)
@@ -161,6 +167,9 @@ async def summary():
         "life": {
             "battery": life["battery"] if life else None,
             "location": life["location"] if life else None,
+            "weather": life["weather"] if life else None,
+            "brightness": life["brightness"] if life else None,
+            "volume": life["volume"] if life else None,
             "note": life["note"] if life else None,
             "device": life["device"] if life else None,
             "timestamp": life["timestamp"] if life else None,
