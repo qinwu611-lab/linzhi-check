@@ -1,7 +1,7 @@
 """
 查岗系统 — HTTP纯接口版（去掉 mcp 依赖，解决 mcp.server.fastmcp 导入失败崩溃）
 按日本时间每日刷新：当天使用时长统计，每天零点自动清零
-加：iPhone 快捷指令上报电量/位置/天气/亮度/音量/自定义消息，存 life_states，查岗汇总时一并返回
+加：iPhone 快捷指令上报电量/位置/天气/亮度/音量/自定义消息/步数，存 life_states，查岗汇总时一并返回
 """
 
 import sqlite3
@@ -38,11 +38,17 @@ def init_db():
             weather TEXT,
             brightness REAL,
             volume REAL,
+            steps INTEGER,
             note TEXT,
             device TEXT DEFAULT 'iphone',
             timestamp TEXT NOT NULL
         )
     """)
+    # 兼容旧库：给已有的 life_states 补 steps 列
+    try:
+        conn.execute("ALTER TABLE life_states ADD COLUMN steps INTEGER")
+    except sqlite3.OperationalError:
+        pass  # 列已存在
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON records(timestamp)")
     conn.commit()
     conn.close()
@@ -93,6 +99,16 @@ def coerce_num(v):
         return None
 
 
+def coerce_int(v):
+    """把 int/字符串 统一转成 int；转不了就返回 None"""
+    if v is None:
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
 app = FastAPI(title="查岗系统")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -110,6 +126,7 @@ class LifeBody(BaseModel):
     weather: str | None = None
     brightness: int | float | str | None = None
     volume: int | float | str | None = None
+    steps: int | str | None = None
     note: str | None = None
     device: str = "iphone"
 
@@ -117,6 +134,11 @@ class LifeBody(BaseModel):
     @classmethod
     def ensure_float(cls, v):
         return coerce_num(v)
+
+    @field_validator("steps")
+    @classmethod
+    def ensure_int(cls, v):
+        return coerce_int(v)
 
 
 @app.get("/ping")
@@ -151,8 +173,8 @@ async def report_life(body: LifeBody, req: Request):
     now = datetime.utcnow().isoformat()
     conn = get_db()
     conn.execute(
-        "INSERT INTO life_states (battery, location, weather, brightness, volume, note, device, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (body.battery, body.location, body.weather, body.brightness, body.volume, body.note, body.device, now),
+        "INSERT INTO life_states (battery, location, weather, brightness, volume, steps, note, device, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (body.battery, body.location, body.weather, body.brightness, body.volume, body.steps, body.note, body.device, now),
     )
     conn.execute("DELETE FROM life_states WHERE id NOT IN (SELECT id FROM life_states ORDER BY id DESC LIMIT 200)")
     conn.commit()
@@ -169,7 +191,7 @@ async def summary():
     cur.execute("SELECT app_name, event, timestamp FROM records ORDER BY id ASC")
     all_rows = cur.fetchall()
     life = conn.execute(
-        "SELECT battery, location, weather, brightness, volume, note, device, timestamp FROM life_states ORDER BY id DESC LIMIT 1"
+        "SELECT battery, location, weather, brightness, volume, steps, note, device, timestamp FROM life_states ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
     sessions = build_sessions(all_rows)
@@ -185,6 +207,7 @@ async def summary():
             "weather": life["weather"] if life else None,
             "brightness": life["brightness"] if life else None,
             "volume": life["volume"] if life else None,
+            "steps": life["steps"] if life else None,
             "note": life["note"] if life else None,
             "device": life["device"] if life else None,
             "timestamp": life["timestamp"] if life else None,
