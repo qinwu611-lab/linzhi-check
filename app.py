@@ -69,24 +69,41 @@ def today_start_utc() -> str:
 
 
 def build_sessions(rows):
-    """只统计日本时间今天内的使用时长（每日刷新）"""
+    """前台切换模型：按时间排序，谁在打开就记谁的时长，各App不重叠，总量=当天活跃总时长"""
     start = today_start_utc()
-    sessions = {}
-    opens = {}
+    events = []
     for r in rows:
         app, ev, ts_str = r["app_name"], r["event"], r["timestamp"]
+        if not app:
+            continue
         if ts_str < start:
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
         except Exception:
             continue
-        if ev == "open":
-            opens[app] = ts
-        elif ev == "close" and app in opens:
-            sessions[app] = sessions.get(app, 0) + (ts - opens[app]).total_seconds()
-            del opens[app]
-    return sessions
+        events.append((ts, app, ev))
+    events.sort(key=lambda x: x[0])
+    sessions = {}
+    current = None
+    current_start = None
+    now = datetime.utcnow()
+    for ts, app, ev in events:
+        if ev != "open":
+            continue
+        if current and current_start is not None:
+            sessions[current] = sessions.get(current, 0) + (ts - current_start).total_seconds()
+        current = app
+        current_start = ts
+    if current and current_start is not None:
+        last_close = now
+        for t, a, e in events:
+            if e == "close" and a == current and t > current_start:
+                last_close = t
+        if last_close < current_start:
+            last_close = now
+        sessions[current] = sessions.get(current, 0) + max(0, (last_close - current_start).total_seconds())
+    return {k: int(v) for k, v in sessions.items() if v > 0}
 
 
 def coerce_num(v):
